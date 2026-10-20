@@ -115,9 +115,74 @@
     },
   };
 
+  // A small seeded random number generator (mulberry32), so a shuffled chart can be rebuilt from its seed.
+  function rng(seed) {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // New arrows for the same rhythm, different every time you dance. The rules keep it playable and lively:
+  //   - a lane is free only when its last note (or hold tail) is far enough back, and a hand that's holding a note
+  //     gets nothing until 0.2 s after the tail (with two thumbs on a tablet, ← ↓ are the left hand, ↑ → the right);
+  //   - 🔥 NORMAL never repeats the last arrow and prefers one that wasn't the arrow before either, so any three
+  //     arrows in a row are usually all different; a jump (X) is one arrow for each hand;
+  //   - 🐣 EASY picks left or right at random, but never more than 3 on the same side in a row.
+  function shuffle(notes, lv, seed) {
+    const rand = rng(seed);
+    const hand = (lane) => (lv.lanes === 2 ? lane : lane < 2 ? 0 : 1);
+    const lastEnd = [-9, -9, -9, -9], handT = [-9, -9], busy = [-9, -9];
+    const recent = []; // lanes of the last single notes, newest last
+    const pick = (cands) => {
+      if (!cands.length) return null;
+      const w = cands.map((l) => {
+        if (lv.lanes === 2) {
+          const run = recent.slice(-3);
+          return run.length === 3 && run.every((x) => x === l) ? 0 : 1;
+        }
+        if (l === recent[recent.length - 1]) return 0;
+        return l === recent[recent.length - 2] ? 0.3 : 1;
+      });
+      const total = w.reduce((a, b) => a + b, 0);
+      if (!total) return cands[Math.floor(rand() * cands.length)];
+      let r = rand() * total;
+      for (let i = 0; i < cands.length; i++) if ((r -= w[i]) < 0) return cands[i];
+      return cands[cands.length - 1];
+    };
+    const free = (lane, t) => t - lastEnd[lane] >= lv.gap - 1e-6 && t > busy[hand(lane)] + 1e-6 && t - handT[hand(lane)] >= 0.2 - 1e-6;
+    const out = [];
+    for (let i = 0; i < notes.length; i++) {
+      const n = notes[i];
+      const jump = notes[i + 1] && notes[i + 1].slot === n.slot;
+      let lanes;
+      if (jump) {
+        i++;
+        lanes = [pick([0, 1].filter((l) => free(l, n.t))), pick([2, 3].filter((l) => free(l, n.t)))].filter((l) => l != null);
+        if (!lanes.length) lanes = [n.lane];
+      } else {
+        const l = pick([...Array(lv.lanes).keys()].filter((x) => free(x, n.t)));
+        lanes = [l == null ? n.lane : l];
+        recent.push(lanes[0]);
+      }
+      for (const lane of lanes) {
+        out.push(Object.assign({}, n, { lane }));
+        lastEnd[lane] = n.tail || n.t;
+        handT[hand(lane)] = n.t;
+        if (n.tail) busy[hand(lane)] = n.tail + 0.2;
+      }
+    }
+    return out;
+  }
+
   // Build the notes for one song and level: [{ id, t, lane, slot, tail (0 for a tap), tailSlot }], sorted by time.
+  // The rhythm (which eighth notes have arrows, the holds and the jumps) always comes from the patterns above. With a
+  // `seed`, the arrows are shuffled (the game does that every time); without, they're the patterns' own.
   // `patterns` lets the checks feed in a broken chart.
-  function build(song, level, patterns) {
+  function build(song, level, patterns, seed) {
     const lv = LEVELS[level];
     const pats = patterns || CHARTS[song.id][level];
     let slots = '';
@@ -130,7 +195,7 @@
       }
     }
     const eighth = song.spb / 2;
-    const notes = [];
+    let notes = [];
     for (let i = 0; i < slots.length; i++) {
       const ch = slots[i];
       if (ch === '.' || ch === '=') continue;
@@ -143,8 +208,10 @@
       }
     }
     notes.sort((a, b) => a.t - b.t || a.lane - b.lane);
+    if (seed != null) notes = shuffle(notes, lv, seed);
+    notes.sort((a, b) => a.t - b.t || a.lane - b.lane);
     notes.forEach((n, i) => (n.id = i));
-    return { song, level: lv, notes };
+    return { song, level: lv, notes, seed: seed == null ? null : seed };
   }
 
   // the song clock starts this long before the first beat, so the first notes can scroll in from the top

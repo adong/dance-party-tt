@@ -210,9 +210,12 @@
     DP.highway.clear();
     const who = ids();
     for (const k of ['teddy', 'tommy']) G.dancers[k].root.visible = who.includes(k);
+    // the arrows are shuffled every time you dance (same rhythm, new arrows), differently for each brother
+    const seed = G.nextSeed != null ? G.nextSeed : Math.floor(Math.random() * 2147483647);
+    G.nextSeed = null;
     G.players = who.map((pid, pi) => {
       const level = save.levels[pid] || 'easy';
-      const chart = DP.charts.build(song, level);
+      const chart = DP.charts.build(song, level, null, (seed + pi * 7919) % 2147483647);
       const p = {
         pi, id: pid, level, L: DP.charts.LEVELS[level], chart, pressed: [], first: 0, lanes: [], hitY: 0, topY: 0, noteSize: 60,
         dancer: G.dancers[pid], autoUp: [], best: null,
@@ -557,7 +560,8 @@
         else if (n === 1) xs.push(ml + lw / 2, ml + lw * 1.5 + gap, W - mr - lw * 1.5 - gap, W - mr - lw / 2);
         else if (pi === 0) for (let i = 0; i < k; i++) xs.push(ml + lw / 2 + i * (lw + gap));
         else for (let i = 0; i < k; i++) xs.push(W - mr - lw / 2 - (k - 1 - i) * (lw + gap));
-        p.lanes = xs.map((x, i) => ({ i, x, w: lw, color: COLORS[p.level][i], dir: DIRS[p.level][i] }));
+        // (a window that's still 0 px wide, like a tab opened in the background, must not push a lane off screen)
+        p.lanes = xs.map((x, i) => ({ i, x: clamp(x, lw / 2, Math.max(lw / 2, W - lw / 2)), w: lw, color: COLORS[p.level][i], dir: DIRS[p.level][i] }));
         p.noteSize = Math.min(lw * 0.86, ph * 0.95, 100);
         p.hitY = padTop - 10 - p.noteSize / 2;
         p.topY = topY;
@@ -871,9 +875,10 @@
       return game.info();
     },
     hold(on = true) { G.held = on; },
-    // start(songId, { who: 'teddy' | 'tommy' | 'both', levels: { teddy, tommy } })
+    // start(songId, { who: 'teddy' | 'tommy' | 'both', levels: { teddy, tommy }, seed }) - seed: the arrow shuffle
     start(id = save.song, o = {}) {
       if (o.who) save.who = o.who;
+      if (o.seed != null) G.nextSeed = o.seed;
       if (o.levels) Object.assign(save.levels, o.levels);
       if (G.state === 'timing') closeTiming();
       startSong(id);
@@ -895,7 +900,7 @@
         state: G.state, song: G.song && G.song.id, t: G.clock ? +(G.clock.now() - offset()).toFixed(3) : null,
         clock: G.clock ? G.clock.mode() : null, audio: A.ctx ? A.ctx.state : 'none', offset: offset(), manual: G.manual,
         players: G.players.map((p) => ({
-          id: p.id, level: p.level, score: p.eng.score, combo: p.eng.combo, maxCombo: p.eng.maxCombo, counts: Object.assign({}, p.eng.counts),
+          id: p.id, level: p.level, seed: p.chart.seed, score: p.eng.score, combo: p.eng.combo, maxCombo: p.eng.maxCombo, counts: Object.assign({}, p.eng.counts),
           meter: +p.eng.meter.toFixed(3), failed: p.eng.failed, stars: DP.engine.stars(p.eng), notes: p.eng.notes.length, boosted: G.clock && G.clock.now() - offset() < p.eng.boost,
         })),
         buddy: DP.buddy.info(),

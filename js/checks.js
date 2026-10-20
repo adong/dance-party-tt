@@ -4,6 +4,8 @@
      playable   no impossible notes: same lane far enough apart, nothing on the same hand during a hold or at the same
                 moment (two thumbs on a tablet), and the first notes can scroll in from the top
      easyLanes  🐣 EASY charts use exactly the 2 big lanes; 🔥 NORMAL uses all 4
+     variety    the arrows the game shuffles every time are well mixed: never "all ← so far" (details at variety())
+   grid, playable and easyLanes run on each chart's own arrows and on 50 shuffles of it; perfect on 4 shuffles.
      perfect    a perfect autopilot (pressing at the exact times, and again at 60 frames a second) gets every PERFECT
                 and every hold, on every song at both levels
      allMiss    an autopilot that never presses never ends a song on EASY (NORMAL's dance meter may run out)
@@ -11,7 +13,7 @@
                 suspended, picks the audio up again without a jump, stands still while paused, never runs backwards
      calibration  taps 120 ms late (with wobble and stray taps) set a 120 ms timing offset
    run({ prove: true }) also breaks each one on purpose (a note 5 ms off the grid, two notes under one thumb, a third
-   lane on EASY, a late autopilot, EASY that can fail, a clock without the fallback, an average instead of a median)
+   lane on EASY, a chart that's all ←, a late autopilot, EASY that can fail, a clock without the fallback, an average instead of a median)
    and checks that every check then fails.
    In the page: game.check(). In node: node tools/check.js. */
 (function () {
@@ -20,12 +22,19 @@
   const MS = 0.001;
 
   const levels = () => Object.keys(DP.charts.LEVELS);
-  const each = (fn) => {
+  // The game shuffles the arrows every time (DP.charts.build with a seed), so the chart checks run on the patterns' own
+  // arrows (seed null) and on 50 shuffles of each chart; the autopilot on 4.
+  const SEEDS = [null].concat([...Array(50).keys()].map((i) => 1000 + i * 7919));
+  const FEW = SEEDS.slice(0, 5);
+  const each = (fn, seeds = [null]) => {
     const out = [];
-    for (const song of DP.songs.list) for (const lv of levels()) out.push(...(fn(song, lv) || []));
+    for (const song of DP.songs.list) for (const lv of levels()) for (const seed of seeds) {
+      const bad = fn(song, lv, seed) || [];
+      out.push(...bad.map((b) => (seed == null ? b : b.replace(/^(\S+): /, `$1 (seed ${seed}): `))));
+    }
     return out;
   };
-  const chartOf = (song, lv, opt) => (opt.chart ? opt.chart(song, lv) : DP.charts.build(song, lv));
+  const chartOf = (song, lv, opt, seed = null) => (opt.chart ? opt.chart(song, lv, seed) : DP.charts.build(song, lv, null, seed));
 
   // ---------------------------------------------------------------- grid
   function onsets(song) {
@@ -37,11 +46,11 @@
     };
   }
   function grid(opt = {}) {
-    return each((song, lv) => {
+    return each((song, lv, seed) => {
       const bad = [];
       const q = 30 / song.bpm; // an eighth note, worked out again from the tempo
       const sounds = onsets(song);
-      for (const n of chartOf(song, lv, opt).notes) {
+      for (const n of chartOf(song, lv, opt, seed).notes) {
         for (const [what, t] of [['note', n.t]].concat(n.tail ? [['tail', n.tail]] : [])) {
           const off = Math.abs(t - Math.round(t / q) * q);
           if (off > MS) bad.push(`${what} ${n.id} is ${(off * 1000).toFixed(1)} ms off the grid`);
@@ -51,15 +60,15 @@
         if (n.t > song.finalHit + MS || (n.tail && n.tail > song.finalHit + MS)) bad.push(`note ${n.id} is after the final hit`);
       }
       return bad.slice(0, 3).map((b) => `${song.id}/${lv}: ${b}`);
-    });
+    }, SEEDS);
   }
 
   // ---------------------------------------------------------------- playable
   const handOf = (lv, lane) => (DP.charts.LEVELS[lv].lanes === 2 ? lane : lane < 2 ? 0 : 1);
   function playable(opt = {}) {
-    return each((song, lv) => {
+    return each((song, lv, seed) => {
       const L = DP.charts.LEVELS[lv];
-      const notes = chartOf(song, lv, opt).notes;
+      const notes = chartOf(song, lv, opt, seed).notes;
       const bad = [];
       const lastEnd = {};
       for (const n of notes) {
@@ -84,16 +93,41 @@
       if (notes.length && notes[0].t - L.travel < -DP.charts.LEADIN) bad.push('the first note would appear mid-screen');
       if (notes.length < 20) bad.push(`only ${notes.length} notes`);
       return bad.slice(0, 3).map((b) => `${song.id}/${lv}: ${b}`);
-    });
+    }, SEEDS);
   }
 
   // ---------------------------------------------------------------- lanes
   function easyLanes(opt = {}) {
-    return each((song, lv) => {
-      const used = [...new Set(chartOf(song, lv, opt).notes.map((n) => n.lane))].sort();
+    return each((song, lv, seed) => {
+      const used = [...new Set(chartOf(song, lv, opt, seed).notes.map((n) => n.lane))].sort();
       const want = lv === 'easy' ? '0,1' : '0,1,2,3';
       return used.join() === want ? [] : [`${song.id}/${lv}: uses lanes ${used.join(' ')}`];
-    });
+    }, SEEDS);
+  }
+
+  // ---------------------------------------------------------------- variety
+  // The shuffled arrows (what you actually dance) are mixed: never "all ← so far". Over 50 shuffles of every chart:
+  // the first 6 arrows use both sides (EASY) or 3 arrows (NORMAL); no more than 3 in a row on one side (EASY) or 2 on
+  // one arrow (NORMAL); any 8 arrows in a row on NORMAL use at least 3 of the 4; no arrow has more than 70 % (EASY)
+  // or 45 % (NORMAL) of the song.
+  function variety(opt = {}) {
+    return each((song, lv, seed) => {
+      const easy = DP.charts.LEVELS[lv].lanes === 2;
+      const notes = chartOf(song, lv, opt, seed).notes;
+      const singles = notes.filter((n, i) => !notes.some((m, j) => j !== i && m.slot === n.slot)).map((n) => n.lane);
+      const bad = [];
+      const first = new Set(singles.slice(0, 6)).size;
+      if (first < (easy ? 2 : 3)) bad.push(`the first 6 arrows use only ${first} lane${first > 1 ? 's' : ''}`);
+      let run = 1, worst = 1;
+      for (let i = 1; i < singles.length; i++) { run = singles[i] === singles[i - 1] ? run + 1 : 1; worst = Math.max(worst, run); }
+      if (worst > (easy ? 3 : 2)) bad.push(`${worst} in a row on one lane`);
+      if (!easy) for (let i = 0; i + 8 <= singles.length; i++) if (new Set(singles.slice(i, i + 8)).size < 3) { bad.push(`arrows ${i}-${i + 7} use under 3 lanes`); break; }
+      const counts = [0, 0, 0, 0];
+      for (const n of notes) counts[n.lane]++;
+      const share = Math.max(...counts) / notes.length;
+      if (share > (easy ? 0.7 : 0.45)) bad.push(`one lane has ${Math.round(share * 100)} % of the notes`);
+      return bad.slice(0, 2).map((b) => `${song.id}/${lv}: ${b}`);
+    }, SEEDS.slice(1));
   }
 
   // ---------------------------------------------------------------- autopilots
@@ -102,7 +136,7 @@
   }
   // Press every note at its time (+ late), let go at its tail; `fps` quantises the presses to frames.
   function autoplay(song, lv, opt, { late = 0, fps = 0, press = true } = {}) {
-    const chart = chartOf(song, lv, opt);
+    const chart = chartOf(song, lv, opt, opt.seed == null ? null : opt.seed);
     const p = DP.engine.create(Object.assign({}, chart, { level: levelFor(lv, opt) }));
     const E = DP.engine;
     if (fps) {
@@ -139,10 +173,10 @@
 
   function perfect(opt = {}) {
     const late = opt.late || 0;
-    return each((song, lv) => {
+    return each((song, lv, seed) => {
       const bad = [];
       for (const fps of [0, 60]) {
-        const p = autoplay(song, lv, opt, { late, fps });
+        const p = autoplay(song, lv, Object.assign({}, opt, { seed }), { late, fps });
         const holds = p.notes.filter((n) => n.tail).length;
         const how = fps ? `at ${fps} fps` : 'exact';
         if (p.counts.PERFECT !== p.notes.length) bad.push(`${how}: ${p.counts.PERFECT}/${p.notes.length} PERFECT`);
@@ -150,7 +184,7 @@
         if (p.maxCombo !== p.notes.length || DP.engine.stars(p) !== 3 || !DP.engine.done(p) || p.failed) bad.push(`${how}: combo ${p.maxCombo}, ${DP.engine.stars(p)} stars`);
       }
       return bad.slice(0, 2).map((b) => `${song.id}/${lv}: ${b}`);
-    });
+    }, FEW);
   }
 
   function allMiss(opt = {}) {
@@ -271,7 +305,7 @@
   };
 
   // ---------------------------------------------------------------- run them all
-  const CHECKS = { grid, playable, easyLanes, perfect, allMiss, fallback, calibration };
+  const CHECKS = { grid, playable, easyLanes, variety, perfect, allMiss, fallback, calibration };
 
   // ways to break each check on purpose
   const SABOTAGE = {
@@ -286,6 +320,7 @@
         return c;
       },
     },
+    variety: { chart: (s, lv) => { const c = DP.charts.build(s, lv); c.notes = c.notes.map((n) => Object.assign({}, n, { lane: 0 })); return c; } }, // all ←
     easyLanes: { chart: (s, lv) => { const c = DP.charts.build(s, lv); if (lv === 'easy') c.notes[5] = Object.assign({}, c.notes[5], { lane: 3 }); return c; } },
     perfect: { late: 0.06 },
     allMiss: { level: (L) => Object.assign({}, L, { canFail: true }) },

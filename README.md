@@ -70,7 +70,8 @@ All six are our own, composed in code in [js/songs.js](js/songs.js): chords per 
 
 The cards show 🐢 (up to 100 BPM), 🐇 (up to 120) or ⚡ for the speed, and your best stars at each level.
 
-- **Charts** ([js/charts.js](js/charts.js)) are built on each song's beat grid: every bar has 8 slots, one per eighth note, and the patterns that fill them are hand-tuned per section and level ('a' falls back to 'A'). EASY only uses the beats; NORMAL mixes quarter and eighth notes, adds jumps on the big moments and holds over long melody notes.
+- **Charts** ([js/charts.js](js/charts.js)) are built on each song's beat grid: every bar has 8 slots, one per eighth note, and the patterns that fill them are hand-tuned per section and level ('a' falls back to 'A'). They set the rhythm: EASY only uses the beats; NORMAL mixes quarter and eighth notes, adds jumps on the big moments and holds over long melody notes.
+- **The arrows are shuffled every time you dance** (and differently for each brother), so the same song never plays the same way twice. The rules keep it playable: a lane is only used again when it's far enough from its last note, a thumb that's holding a note gets nothing else until just after the hold ends, and a jump is one arrow for each thumb. On NORMAL the next arrow is never the same as the last one, and usually not the one before either. On EASY it's left or right at random, but never more than 3 on one side in a row.
 - **The music** plays through `Kit.sound.tone` / `Kit.sound.hiss`, so the kit's sound switch mutes it. Songs are scheduled 0.2 s ahead on the AudioContext clock. The kit doesn't hand out its AudioContext, so [js/audio.js](js/audio.js) wraps the AudioContext constructor before the kit makes one (on the first tap or key) and keeps a reference; nothing else about the kit's sound changes.
 - **The song clock** ([js/clock.js](js/clock.js)) follows the AudioContext clock while the sound runs, so the arrows and the music can't drift apart, and carries on from `performance.now()` when the sound is suspended (before the first tap, while the browser has the audio asleep). When the audio comes back it picks it up again without a jump. Pausing stops both, and the ? panel freezes both.
 
@@ -104,23 +105,25 @@ Call your brother any time in a song, as often as you like: **T** (or Enter with
 
 Nobody listened (Alan works next to the sessions), so the game was tested muted and the sync was proved in code.
 
-**Headless, in Node:** `node tools/check.js` runs the page's own songs, charts, clock and judging ([js/checks.js](js/checks.js)) without a browser, in about 0.15 s. In the page the same checks run as `game.check()`. All pass:
+**Headless, in Node:** `node tools/check.js` runs the page's own songs, charts, clock and judging ([js/checks.js](js/checks.js)) without a browser, in under a second. In the page the same checks run as `game.check()`. All pass:
 
 - **grid:** every note and hold tail of all 12 charts sits on its song's eighth-note grid to within 1 ms (worked out again from the tempo), a drum or note of the music sounds at that moment, and nothing is in the count-in bar or after the final hit.
 - **playable:** no impossible notes: the same lane is at least 0.4 s apart on EASY and 0.2 s on NORMAL (after a hold's tail), nothing needs one thumb twice at once or while it's holding, and the first arrows can scroll in from the top.
 - **easyLanes:** EASY charts use exactly the 2 lanes; NORMAL uses all 4.
+- **variety:** the shuffled arrows are well mixed, never "all ← so far": the first 6 arrows use both sides (EASY) or 3 different arrows (NORMAL), at most 3 in a row on one side (EASY) or 2 on one arrow (NORMAL), any 8 arrows in a row on NORMAL use at least 3 of the 4, and no arrow has more than 70 % (EASY) or 45 % (NORMAL) of a song.
+- grid, playable, easyLanes and variety run on 50 shuffles of every chart (plus the patterns' own arrows), and perfect on 4 shuffles, because a new shuffle is dealt every time.
 - **perfect:** an autopilot pressing every note at its exact time gets every PERFECT, every hold and 3 stars, on every song at both levels; so does one pressing on 60 fps frames.
 - **allMiss:** an autopilot that never presses never ends a song on EASY. (On NORMAL its meter runs out after 9 misses, as it should.)
 - **fallback:** with fake clocks, the song clock follows the audio clock, keeps time from `performance.now()` while the audio is suspended (2 s to the millisecond), picks the audio clock up again without a jump, stands still while paused and while the ? panel is open, keeps the music's anchor through a pause, and never runs backwards.
 - **calibration:** taps 120 ms late with wobble, a double tap and a stray tap give 120 ms; on time gives 0; two taps are not enough.
-- **The checks can fail:** `game.check()` (and the Node run) also breaks each check on purpose and confirms it then fails: a note 5 ms off the grid, two notes under one thumb, a third lane on EASY, an autopilot 60 ms late, an EASY that can end, a clock with no fallback, an average instead of a median.
+- **The checks can fail:** `game.check()` (and the Node run) also breaks each check on purpose and confirms it then fails: a note 5 ms off the grid, two notes under one thumb, a third lane on EASY, a chart that's all ←, an autopilot 60 ms late, an EASY that can end, a clock with no fallback, an average instead of a median.
 
 **In the Browser pane** (time driven by `game.step()`, because the hidden pane throttles `requestAnimationFrame`):
 
 ```js
 localStorage.setItem('claudeGames.muted', '1')   // always, before anything plays; then reload
 game.hold(true)                                  // only game.step() moves time (on a stand-in clock)
-game.start('robot', { who: 'both', levels: { teddy: 'normal', tommy: 'easy' } })
+game.start('robot', { who: 'both', levels: { teddy: 'normal', tommy: 'easy' }, seed: 42 })   // seed: the arrow shuffle (optional)
 game.autopilot('perfect')                        // or 'miss', or null to hand it back
 game.step(10)                                    // advance 10 s at 60 fps, drawing as it goes
 game.buddy(0); game.pause(true); game.pause(false)
@@ -142,7 +145,7 @@ game.info()                                      // state, song time, clock mode
 index.html          page, menus, HUD, pads and overlays (CSS inline)
 js/title.js         the game's name, in one place
 js/songs.js         the six songs as data, compiled to timed sound events (no Three.js, runs in Node)
-js/charts.js        the hand-tuned note charts on each song's beat grid, EASY and NORMAL (runs in Node)
+js/charts.js        the hand-tuned rhythms on each song's beat grid, EASY and NORMAL, and the arrow shuffle (runs in Node)
 js/clock.js         the song clock (audio clock with a performance.now() fallback) and the timing maths (runs in Node)
 js/engine.js        judging, score, combo, stars, the dance meter, holds (runs in Node)
 js/checks.js        the headless checks and their proofs (game.check() and tools/check.js)

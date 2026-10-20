@@ -2323,9 +2323,74 @@ document.title = `${window.DP_TITLE} · Teddy & Tommy`;
     },
   };
 
+  // A small seeded random number generator (mulberry32), so a shuffled chart can be rebuilt from its seed.
+  function rng(seed) {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // New arrows for the same rhythm, different every time you dance. The rules keep it playable and lively:
+  //   - a lane is free only when its last note (or hold tail) is far enough back, and a hand that's holding a note
+  //     gets nothing until 0.2 s after the tail (with two thumbs on a tablet, ← ↓ are the left hand, ↑ → the right);
+  //   - 🔥 NORMAL never repeats the last arrow and prefers one that wasn't the arrow before either, so any three
+  //     arrows in a row are usually all different; a jump (X) is one arrow for each hand;
+  //   - 🐣 EASY picks left or right at random, but never more than 3 on the same side in a row.
+  function shuffle(notes, lv, seed) {
+    const rand = rng(seed);
+    const hand = (lane) => (lv.lanes === 2 ? lane : lane < 2 ? 0 : 1);
+    const lastEnd = [-9, -9, -9, -9], handT = [-9, -9], busy = [-9, -9];
+    const recent = []; // lanes of the last single notes, newest last
+    const pick = (cands) => {
+      if (!cands.length) return null;
+      const w = cands.map((l) => {
+        if (lv.lanes === 2) {
+          const run = recent.slice(-3);
+          return run.length === 3 && run.every((x) => x === l) ? 0 : 1;
+        }
+        if (l === recent[recent.length - 1]) return 0;
+        return l === recent[recent.length - 2] ? 0.3 : 1;
+      });
+      const total = w.reduce((a, b) => a + b, 0);
+      if (!total) return cands[Math.floor(rand() * cands.length)];
+      let r = rand() * total;
+      for (let i = 0; i < cands.length; i++) if ((r -= w[i]) < 0) return cands[i];
+      return cands[cands.length - 1];
+    };
+    const free = (lane, t) => t - lastEnd[lane] >= lv.gap - 1e-6 && t > busy[hand(lane)] + 1e-6 && t - handT[hand(lane)] >= 0.2 - 1e-6;
+    const out = [];
+    for (let i = 0; i < notes.length; i++) {
+      const n = notes[i];
+      const jump = notes[i + 1] && notes[i + 1].slot === n.slot;
+      let lanes;
+      if (jump) {
+        i++;
+        lanes = [pick([0, 1].filter((l) => free(l, n.t))), pick([2, 3].filter((l) => free(l, n.t)))].filter((l) => l != null);
+        if (!lanes.length) lanes = [n.lane];
+      } else {
+        const l = pick([...Array(lv.lanes).keys()].filter((x) => free(x, n.t)));
+        lanes = [l == null ? n.lane : l];
+        recent.push(lanes[0]);
+      }
+      for (const lane of lanes) {
+        out.push(Object.assign({}, n, { lane }));
+        lastEnd[lane] = n.tail || n.t;
+        handT[hand(lane)] = n.t;
+        if (n.tail) busy[hand(lane)] = n.tail + 0.2;
+      }
+    }
+    return out;
+  }
+
   // Build the notes for one song and level: [{ id, t, lane, slot, tail (0 for a tap), tailSlot }], sorted by time.
+  // The rhythm (which eighth notes have arrows, the holds and the jumps) always comes from the patterns above. With a
+  // `seed`, the arrows are shuffled (the game does that every time); without, they're the patterns' own.
   // `patterns` lets the checks feed in a broken chart.
-  function build(song, level, patterns) {
+  function build(song, level, patterns, seed) {
     const lv = LEVELS[level];
     const pats = patterns || CHARTS[song.id][level];
     let slots = '';
@@ -2338,7 +2403,7 @@ document.title = `${window.DP_TITLE} · Teddy & Tommy`;
       }
     }
     const eighth = song.spb / 2;
-    const notes = [];
+    let notes = [];
     for (let i = 0; i < slots.length; i++) {
       const ch = slots[i];
       if (ch === '.' || ch === '=') continue;
@@ -2351,8 +2416,10 @@ document.title = `${window.DP_TITLE} · Teddy & Tommy`;
       }
     }
     notes.sort((a, b) => a.t - b.t || a.lane - b.lane);
+    if (seed != null) notes = shuffle(notes, lv, seed);
+    notes.sort((a, b) => a.t - b.t || a.lane - b.lane);
     notes.forEach((n, i) => (n.id = i));
-    return { song, level: lv, notes };
+    return { song, level: lv, notes, seed: seed == null ? null : seed };
   }
 
   // the song clock starts this long before the first beat, so the first notes can scroll in from the top
@@ -2584,6 +2651,8 @@ document.title = `${window.DP_TITLE} · Teddy & Tommy`;
      playable   no impossible notes: same lane far enough apart, nothing on the same hand during a hold or at the same
                 moment (two thumbs on a tablet), and the first notes can scroll in from the top
      easyLanes  🐣 EASY charts use exactly the 2 big lanes; 🔥 NORMAL uses all 4
+     variety    the arrows the game shuffles every time are well mixed: never "all ← so far" (details at variety())
+   grid, playable and easyLanes run on each chart's own arrows and on 50 shuffles of it; perfect on 4 shuffles.
      perfect    a perfect autopilot (pressing at the exact times, and again at 60 frames a second) gets every PERFECT
                 and every hold, on every song at both levels
      allMiss    an autopilot that never presses never ends a song on EASY (NORMAL's dance meter may run out)
@@ -2591,7 +2660,7 @@ document.title = `${window.DP_TITLE} · Teddy & Tommy`;
                 suspended, picks the audio up again without a jump, stands still while paused, never runs backwards
      calibration  taps 120 ms late (with wobble and stray taps) set a 120 ms timing offset
    run({ prove: true }) also breaks each one on purpose (a note 5 ms off the grid, two notes under one thumb, a third
-   lane on EASY, a late autopilot, EASY that can fail, a clock without the fallback, an average instead of a median)
+   lane on EASY, a chart that's all ←, a late autopilot, EASY that can fail, a clock without the fallback, an average instead of a median)
    and checks that every check then fails.
    In the page: game.check(). In node: node tools/check.js. */
 (function () {
@@ -2600,12 +2669,19 @@ document.title = `${window.DP_TITLE} · Teddy & Tommy`;
   const MS = 0.001;
 
   const levels = () => Object.keys(DP.charts.LEVELS);
-  const each = (fn) => {
+  // The game shuffles the arrows every time (DP.charts.build with a seed), so the chart checks run on the patterns' own
+  // arrows (seed null) and on 50 shuffles of each chart; the autopilot on 4.
+  const SEEDS = [null].concat([...Array(50).keys()].map((i) => 1000 + i * 7919));
+  const FEW = SEEDS.slice(0, 5);
+  const each = (fn, seeds = [null]) => {
     const out = [];
-    for (const song of DP.songs.list) for (const lv of levels()) out.push(...(fn(song, lv) || []));
+    for (const song of DP.songs.list) for (const lv of levels()) for (const seed of seeds) {
+      const bad = fn(song, lv, seed) || [];
+      out.push(...bad.map((b) => (seed == null ? b : b.replace(/^(\S+): /, `$1 (seed ${seed}): `))));
+    }
     return out;
   };
-  const chartOf = (song, lv, opt) => (opt.chart ? opt.chart(song, lv) : DP.charts.build(song, lv));
+  const chartOf = (song, lv, opt, seed = null) => (opt.chart ? opt.chart(song, lv, seed) : DP.charts.build(song, lv, null, seed));
 
   // ---------------------------------------------------------------- grid
   function onsets(song) {
@@ -2617,11 +2693,11 @@ document.title = `${window.DP_TITLE} · Teddy & Tommy`;
     };
   }
   function grid(opt = {}) {
-    return each((song, lv) => {
+    return each((song, lv, seed) => {
       const bad = [];
       const q = 30 / song.bpm; // an eighth note, worked out again from the tempo
       const sounds = onsets(song);
-      for (const n of chartOf(song, lv, opt).notes) {
+      for (const n of chartOf(song, lv, opt, seed).notes) {
         for (const [what, t] of [['note', n.t]].concat(n.tail ? [['tail', n.tail]] : [])) {
           const off = Math.abs(t - Math.round(t / q) * q);
           if (off > MS) bad.push(`${what} ${n.id} is ${(off * 1000).toFixed(1)} ms off the grid`);
@@ -2631,15 +2707,15 @@ document.title = `${window.DP_TITLE} · Teddy & Tommy`;
         if (n.t > song.finalHit + MS || (n.tail && n.tail > song.finalHit + MS)) bad.push(`note ${n.id} is after the final hit`);
       }
       return bad.slice(0, 3).map((b) => `${song.id}/${lv}: ${b}`);
-    });
+    }, SEEDS);
   }
 
   // ---------------------------------------------------------------- playable
   const handOf = (lv, lane) => (DP.charts.LEVELS[lv].lanes === 2 ? lane : lane < 2 ? 0 : 1);
   function playable(opt = {}) {
-    return each((song, lv) => {
+    return each((song, lv, seed) => {
       const L = DP.charts.LEVELS[lv];
-      const notes = chartOf(song, lv, opt).notes;
+      const notes = chartOf(song, lv, opt, seed).notes;
       const bad = [];
       const lastEnd = {};
       for (const n of notes) {
@@ -2664,16 +2740,41 @@ document.title = `${window.DP_TITLE} · Teddy & Tommy`;
       if (notes.length && notes[0].t - L.travel < -DP.charts.LEADIN) bad.push('the first note would appear mid-screen');
       if (notes.length < 20) bad.push(`only ${notes.length} notes`);
       return bad.slice(0, 3).map((b) => `${song.id}/${lv}: ${b}`);
-    });
+    }, SEEDS);
   }
 
   // ---------------------------------------------------------------- lanes
   function easyLanes(opt = {}) {
-    return each((song, lv) => {
-      const used = [...new Set(chartOf(song, lv, opt).notes.map((n) => n.lane))].sort();
+    return each((song, lv, seed) => {
+      const used = [...new Set(chartOf(song, lv, opt, seed).notes.map((n) => n.lane))].sort();
       const want = lv === 'easy' ? '0,1' : '0,1,2,3';
       return used.join() === want ? [] : [`${song.id}/${lv}: uses lanes ${used.join(' ')}`];
-    });
+    }, SEEDS);
+  }
+
+  // ---------------------------------------------------------------- variety
+  // The shuffled arrows (what you actually dance) are mixed: never "all ← so far". Over 50 shuffles of every chart:
+  // the first 6 arrows use both sides (EASY) or 3 arrows (NORMAL); no more than 3 in a row on one side (EASY) or 2 on
+  // one arrow (NORMAL); any 8 arrows in a row on NORMAL use at least 3 of the 4; no arrow has more than 70 % (EASY)
+  // or 45 % (NORMAL) of the song.
+  function variety(opt = {}) {
+    return each((song, lv, seed) => {
+      const easy = DP.charts.LEVELS[lv].lanes === 2;
+      const notes = chartOf(song, lv, opt, seed).notes;
+      const singles = notes.filter((n, i) => !notes.some((m, j) => j !== i && m.slot === n.slot)).map((n) => n.lane);
+      const bad = [];
+      const first = new Set(singles.slice(0, 6)).size;
+      if (first < (easy ? 2 : 3)) bad.push(`the first 6 arrows use only ${first} lane${first > 1 ? 's' : ''}`);
+      let run = 1, worst = 1;
+      for (let i = 1; i < singles.length; i++) { run = singles[i] === singles[i - 1] ? run + 1 : 1; worst = Math.max(worst, run); }
+      if (worst > (easy ? 3 : 2)) bad.push(`${worst} in a row on one lane`);
+      if (!easy) for (let i = 0; i + 8 <= singles.length; i++) if (new Set(singles.slice(i, i + 8)).size < 3) { bad.push(`arrows ${i}-${i + 7} use under 3 lanes`); break; }
+      const counts = [0, 0, 0, 0];
+      for (const n of notes) counts[n.lane]++;
+      const share = Math.max(...counts) / notes.length;
+      if (share > (easy ? 0.7 : 0.45)) bad.push(`one lane has ${Math.round(share * 100)} % of the notes`);
+      return bad.slice(0, 2).map((b) => `${song.id}/${lv}: ${b}`);
+    }, SEEDS.slice(1));
   }
 
   // ---------------------------------------------------------------- autopilots
@@ -2682,7 +2783,7 @@ document.title = `${window.DP_TITLE} · Teddy & Tommy`;
   }
   // Press every note at its time (+ late), let go at its tail; `fps` quantises the presses to frames.
   function autoplay(song, lv, opt, { late = 0, fps = 0, press = true } = {}) {
-    const chart = chartOf(song, lv, opt);
+    const chart = chartOf(song, lv, opt, opt.seed == null ? null : opt.seed);
     const p = DP.engine.create(Object.assign({}, chart, { level: levelFor(lv, opt) }));
     const E = DP.engine;
     if (fps) {
@@ -2719,10 +2820,10 @@ document.title = `${window.DP_TITLE} · Teddy & Tommy`;
 
   function perfect(opt = {}) {
     const late = opt.late || 0;
-    return each((song, lv) => {
+    return each((song, lv, seed) => {
       const bad = [];
       for (const fps of [0, 60]) {
-        const p = autoplay(song, lv, opt, { late, fps });
+        const p = autoplay(song, lv, Object.assign({}, opt, { seed }), { late, fps });
         const holds = p.notes.filter((n) => n.tail).length;
         const how = fps ? `at ${fps} fps` : 'exact';
         if (p.counts.PERFECT !== p.notes.length) bad.push(`${how}: ${p.counts.PERFECT}/${p.notes.length} PERFECT`);
@@ -2730,7 +2831,7 @@ document.title = `${window.DP_TITLE} · Teddy & Tommy`;
         if (p.maxCombo !== p.notes.length || DP.engine.stars(p) !== 3 || !DP.engine.done(p) || p.failed) bad.push(`${how}: combo ${p.maxCombo}, ${DP.engine.stars(p)} stars`);
       }
       return bad.slice(0, 2).map((b) => `${song.id}/${lv}: ${b}`);
-    });
+    }, FEW);
   }
 
   function allMiss(opt = {}) {
@@ -2851,7 +2952,7 @@ document.title = `${window.DP_TITLE} · Teddy & Tommy`;
   };
 
   // ---------------------------------------------------------------- run them all
-  const CHECKS = { grid, playable, easyLanes, perfect, allMiss, fallback, calibration };
+  const CHECKS = { grid, playable, easyLanes, variety, perfect, allMiss, fallback, calibration };
 
   // ways to break each check on purpose
   const SABOTAGE = {
@@ -2866,6 +2967,7 @@ document.title = `${window.DP_TITLE} · Teddy & Tommy`;
         return c;
       },
     },
+    variety: { chart: (s, lv) => { const c = DP.charts.build(s, lv); c.notes = c.notes.map((n) => Object.assign({}, n, { lane: 0 })); return c; } }, // all ←
     easyLanes: { chart: (s, lv) => { const c = DP.charts.build(s, lv); if (lv === 'easy') c.notes[5] = Object.assign({}, c.notes[5], { lane: 3 }); return c; } },
     perfect: { late: 0.06 },
     allMiss: { level: (L) => Object.assign({}, L, { canFail: true }) },
@@ -4495,9 +4597,12 @@ document.title = `${window.DP_TITLE} · Teddy & Tommy`;
     DP.highway.clear();
     const who = ids();
     for (const k of ['teddy', 'tommy']) G.dancers[k].root.visible = who.includes(k);
+    // the arrows are shuffled every time you dance (same rhythm, new arrows), differently for each brother
+    const seed = G.nextSeed != null ? G.nextSeed : Math.floor(Math.random() * 2147483647);
+    G.nextSeed = null;
     G.players = who.map((pid, pi) => {
       const level = save.levels[pid] || 'easy';
-      const chart = DP.charts.build(song, level);
+      const chart = DP.charts.build(song, level, null, (seed + pi * 7919) % 2147483647);
       const p = {
         pi, id: pid, level, L: DP.charts.LEVELS[level], chart, pressed: [], first: 0, lanes: [], hitY: 0, topY: 0, noteSize: 60,
         dancer: G.dancers[pid], autoUp: [], best: null,
@@ -4842,7 +4947,8 @@ document.title = `${window.DP_TITLE} · Teddy & Tommy`;
         else if (n === 1) xs.push(ml + lw / 2, ml + lw * 1.5 + gap, W - mr - lw * 1.5 - gap, W - mr - lw / 2);
         else if (pi === 0) for (let i = 0; i < k; i++) xs.push(ml + lw / 2 + i * (lw + gap));
         else for (let i = 0; i < k; i++) xs.push(W - mr - lw / 2 - (k - 1 - i) * (lw + gap));
-        p.lanes = xs.map((x, i) => ({ i, x, w: lw, color: COLORS[p.level][i], dir: DIRS[p.level][i] }));
+        // (a window that's still 0 px wide, like a tab opened in the background, must not push a lane off screen)
+        p.lanes = xs.map((x, i) => ({ i, x: clamp(x, lw / 2, Math.max(lw / 2, W - lw / 2)), w: lw, color: COLORS[p.level][i], dir: DIRS[p.level][i] }));
         p.noteSize = Math.min(lw * 0.86, ph * 0.95, 100);
         p.hitY = padTop - 10 - p.noteSize / 2;
         p.topY = topY;
@@ -5156,9 +5262,10 @@ document.title = `${window.DP_TITLE} · Teddy & Tommy`;
       return game.info();
     },
     hold(on = true) { G.held = on; },
-    // start(songId, { who: 'teddy' | 'tommy' | 'both', levels: { teddy, tommy } })
+    // start(songId, { who: 'teddy' | 'tommy' | 'both', levels: { teddy, tommy }, seed }) - seed: the arrow shuffle
     start(id = save.song, o = {}) {
       if (o.who) save.who = o.who;
+      if (o.seed != null) G.nextSeed = o.seed;
       if (o.levels) Object.assign(save.levels, o.levels);
       if (G.state === 'timing') closeTiming();
       startSong(id);
@@ -5180,7 +5287,7 @@ document.title = `${window.DP_TITLE} · Teddy & Tommy`;
         state: G.state, song: G.song && G.song.id, t: G.clock ? +(G.clock.now() - offset()).toFixed(3) : null,
         clock: G.clock ? G.clock.mode() : null, audio: A.ctx ? A.ctx.state : 'none', offset: offset(), manual: G.manual,
         players: G.players.map((p) => ({
-          id: p.id, level: p.level, score: p.eng.score, combo: p.eng.combo, maxCombo: p.eng.maxCombo, counts: Object.assign({}, p.eng.counts),
+          id: p.id, level: p.level, seed: p.chart.seed, score: p.eng.score, combo: p.eng.combo, maxCombo: p.eng.maxCombo, counts: Object.assign({}, p.eng.counts),
           meter: +p.eng.meter.toFixed(3), failed: p.eng.failed, stars: DP.engine.stars(p.eng), notes: p.eng.notes.length, boosted: G.clock && G.clock.now() - offset() < p.eng.boost,
         })),
         buddy: DP.buddy.info(),
